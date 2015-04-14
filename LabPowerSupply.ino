@@ -26,6 +26,7 @@
 #define ENC_B                   6
 
 #define POWER_ENABLE            A3
+#define SHORT_DETECT            0
 
 #define DIGITAL_POT_ADDR        0x28
 #define MAX_DIGITAL_POT_VALUE   0x0100
@@ -33,17 +34,13 @@
 
 #define DIGITAL_POT_VREG_INC    0x04
 #define DIGITAL_POT_VREG_DEC    0x08
+#define DIGITAL_POT_VREG_WRITE  0x00
 #define DIGITAL_POT_VREG_READ   0x0C
 
 #define DIGITAL_POT_CIN_INC     0x14
 #define DIGITAL_POT_CIN_DEC     0x18
 #define DIGITAL_POT_CIN_WRITE   0x10
 #define DIGITAL_POT_CIN_READ    0x1C
-
-
-#define MAX_VOLTAGE_READ        4.965
-#define MIN_VOLTAGE_READ        0.457
-
 
 #define VIN_IN_MAX              1023.0
 #define VIN_IN_MIN              0.0
@@ -56,7 +53,6 @@
 
 #define VOUT_OUT_MAX            36.30
 #define VOUT_OUT_MIN            0.0
-
 
 #define CIN_IN_MAX              1023.0
 #define CIN_IN_MIN              0.0
@@ -88,6 +84,11 @@
 
 #define VOUT_Y                  60
 #define COUT_Y                  70
+
+#define CREG_Y                  110
+#define VREG_Y                  120
+
+#define STATUS_Y                90
 
 
 //#define DEBOUNCE_INTERVAL 200
@@ -124,11 +125,13 @@ enum STATE_T state = READY;
 int prev_enc_value = -1;
 int enc_value = 0;
 
-uint16_t prev_pot_vreg_val = 0xFFFF;
-uint16_t pot_vreg_val = 0x0000;
+int prev_pot_vreg_val = 0xFFFF;
+int pot_vreg_val = 0x0000;
 
-uint16_t prev_pot_cin_val = 0xFFFF;
-uint16_t pot_cin_val = 0x0000;
+int prev_pot_cin_val = 0xFFFF;
+int pot_cin_val = 0x0000;
+
+bool short_detect;
 
 void timer_isr(){
   encoder.service();
@@ -138,7 +141,14 @@ void setup() {
   // initialize serial communication at 9600 bits per second:
   Serial.begin(57600);
   Wire.begin();
+  set_cin_value(0x0020);
+  read_cin_value();
+  set_vreg_value(0x0040);
+  read_vreg_value();
+
   encoder.setAccelerationEnabled(true);
+  pinMode     (SHORT_DETECT, INPUT);
+  short_detect = digitalRead(SHORT_DETECT);
 
   //Push Buttons
   pinMode     (BUTTON_OK,     INPUT);
@@ -175,6 +185,7 @@ void setup() {
   tft.print("USB Lab Power Supply");
   delay(200);
   tft.fillScreen(ST7735_BLACK);
+  enable_power(true);
 
 }
 
@@ -231,7 +242,22 @@ uint16_t read_vreg_value(void){
 
   Serial.print("VREG: ");
   Serial.println(value, HEX);
+  pot_vreg_val = value;
   return value;
+}
+
+void set_vreg_value(uint16_t value){
+  uint8_t byte_value;
+  Wire.beginTransmission(DIGITAL_POT_ADDR);
+  byte_value = DIGITAL_POT_VREG_WRITE;
+  byte_value |= (0x03 & (value >> 8));
+  Serial.print("VREG Setting: 0x");
+  Serial.print(byte_value, HEX);
+  Wire.write(byte_value);
+  byte_value = (uint8_t)(0xFF & value);
+  Serial.println(byte_value, HEX);
+  Wire.write(byte_value);
+  Wire.endTransmission();
 }
 
 uint16_t read_cin_value(void){
@@ -248,6 +274,7 @@ uint16_t read_cin_value(void){
 
   Serial.print("CIN: ");
   Serial.println(value, HEX);
+  pot_cin_val = value;
   return value;
 }
 
@@ -255,9 +282,13 @@ void set_cin_value(uint16_t value){
   uint8_t byte_value;
   Wire.beginTransmission(DIGITAL_POT_ADDR);
   byte_value = DIGITAL_POT_CIN_WRITE;
-  byte_value |= (0x03 | (value >> 8));
+  byte_value |= (0x03 & (value >> 8));
+  Serial.print("CIN Setting: 0x");
+  Serial.print(byte_value, HEX);
   Wire.write(byte_value);
-  Wire.write((uint8_t)(0xFF | value));
+  byte_value = (uint8_t)(0xFF & value);
+  Serial.println(byte_value, HEX);
+  Wire.write(byte_value);
   Wire.endTransmission();
 }
 
@@ -367,6 +398,11 @@ void state_machine(void){
       tft.setCursor(LABEL_X, COUT_Y);
       tft.print("Output Current:");
 
+      tft.setCursor(LABEL_X, CREG_Y);
+      tft.print("C POT:");
+
+      tft.setCursor(LABEL_X, VREG_Y);
+      tft.print("V POT:");
 
       update_edit_screen();
       state = EDIT;
@@ -423,10 +459,14 @@ void update_idle_screen(void){
   print_float_data(VOUT_Y,  &prev_vout_value, vout_value, ST7735_BLACK, ST7735_BLUE, VOLTAGE_PRECISION);
   print_float_data(COUT_Y,  &prev_cout_value, cout_value, ST7735_BLACK, ST7735_BLUE, CURRENT_PRECISION);
 
+  //Output Debug Data of potentiometer
+  print_int_data(CREG_Y, &prev_pot_cin_val, pot_cin_val, ST7735_BLACK, ST7735_BLUE);
+  print_int_data(VREG_Y, &prev_pot_vreg_val, pot_vreg_val, ST7735_BLACK, ST7735_BLUE);
+
   if (prev_enable != is_enabled()) {
     Serial.println("Change Power Enable");
-    tft.fillRect(100, 90, 50, 10, ST7735_BLACK);
-    tft.setCursor(100, 90);
+    tft.fillRect(DATA_X, STATUS_Y, TEXT_WIDTH, TEXT_HEIGHT, ST7735_BLACK);
+    tft.setCursor(DATA_X, STATUS_Y);
     if (is_enabled()){
       tft.setTextColor(ST7735_RED);
       tft.print("Enable");
@@ -454,8 +494,8 @@ void update_edit_screen(void){
 
   if (prev_enable != is_enabled()) {
     Serial.println("Change Power Enable");
-    tft.fillRect(100, 90, 50, 10, ST7735_WHITE);
-    tft.setCursor(100, 90);
+    tft.fillRect(DATA_X, STATUS_Y, TEXT_WIDTH, TEXT_HEIGHT, ST7735_WHITE);
+    tft.setCursor(DATA_X, STATUS_Y);
     if (digitalRead(POWER_ENABLE)){
       tft.setTextColor(ST7735_RED);
       tft.print("Enable");
